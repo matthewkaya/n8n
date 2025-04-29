@@ -53,6 +53,14 @@ resource "aws_ecs_task_definition" "n8n_task" {
   cpu                      = 512
   memory                   = 1024
   execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  
+  volume {
+    name = "n8n-data"
+    efs_volume_configuration {
+      file_system_id = aws_efs_file_system.n8n_data.id
+      root_directory = "/"
+    }
+  }
 
   container_definitions = jsonencode([
     {
@@ -60,11 +68,11 @@ resource "aws_ecs_task_definition" "n8n_task" {
       image     = var.n8n_image
       essential = true
       
-      portMappings = [
+      mountPoints = [
         {
-          containerPort = var.n8n_port
-          hostPort      = var.n8n_port
-          protocol      = "tcp"
+          sourceVolume  = "n8n-data"
+          containerPath = "/data"
+          readOnly      = false
         }
       ]
       
@@ -80,6 +88,34 @@ resource "aws_ecs_task_definition" "n8n_task" {
         {
           name  = "NODE_ENV"
           value = "production"
+        },
+        {
+          name  = "N8N_SECURE_COOKIE"
+          value = "false"
+        },
+        {
+          name  = "DB_TYPE"
+          value = "sqlite"
+        },
+        {
+          name  = "DB_SQLITE_PATH"
+          value = "/data/database.sqlite"
+        },
+        {
+          name  = "N8N_USER_FOLDER"
+          value = "/data"
+        },
+        {
+          name  = "N8N_DISABLE_PRODUCTION_MAIN_PROCESS"
+          value = "true"
+        },
+        {
+          name  = "WEBHOOK_URL"
+          value = "http://localhost:${var.n8n_port}/"
+        },
+        {
+          name  = "N8N_HOST"
+          value = "0.0.0.0"
         }
       ]
       
@@ -275,4 +311,55 @@ resource "aws_appautoscaling_policy" "n8n_cpu_scaling" {
     scale_in_cooldown  = 300
     scale_out_cooldown = 300
   }
+}
+
+# Add EFS resources for data persistence
+
+resource "aws_efs_file_system" "n8n_data" {
+  creation_token = "${var.project_name}-efs"
+  encrypted      = true
+
+  lifecycle_policy {
+    transition_to_ia = "AFTER_30_DAYS"
+  }
+
+  tags = {
+    Name        = "${var.project_name}-efs"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+resource "aws_security_group" "efs_sg" {
+  name        = "${var.project_name}-efs-sg"
+  description = "Security group for n8n EFS"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = 2049 # NFS port
+    to_port         = 2049
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.project_name}-efs-sg"
+    Environment = var.environment
+    Project     = var.project_name
+  }
+}
+
+resource "aws_efs_mount_target" "n8n_efs_mount" {
+  for_each = toset(var.private_subnets)
+
+  file_system_id  = aws_efs_file_system.n8n_data.id
+  subnet_id       = each.value
+  security_groups = [aws_security_group.efs_sg.id]
 }
